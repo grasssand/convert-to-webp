@@ -1,5 +1,6 @@
 import csv
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -34,11 +35,13 @@ class Converter:
         self.quality = quality
         self.lossless = lossless
 
+        self.missing = []
+
     def check_libwebp(self) -> bool:
         return bool(shutil.which("cwebp") and shutil.which("gif2webp"))
 
     def is_image(self, file: Path) -> bool:
-        return file.suffix.lower() in IMAGE_EXT
+        return file.is_file() and (file.suffix.lower() in IMAGE_EXT)
 
     def get_output_path(self, input_path: Path) -> Path:
         output_path = (
@@ -53,20 +56,18 @@ class Converter:
 
     def parse_stdout(
         self, input_file: Path, stdout: str
-    ) -> tuple[str, int, int | None, float | None]:
-        original_name = str(
-            input_file.relative_to(
-                self.input_dir if self.input_dir.is_dir() else self.input_dir.parent
-            )
-        )
-        original_size = round(input_file.stat().st_size / 1024)  # bytes to KB
-        new_size, changed_size = None, None
+    ) -> tuple[str, str, int, int | None, float | None]:
+        file_dir, file_name = str(input_file.parent), input_file.name
+        original_size = math.ceil(
+            input_file.stat().st_size / 1024
+        )  # bytes to KB, min is 1KB
+        webp_size, changed_rate = None, None
         matched = re_output_file_size.search(stdout)
-        if matched:
-            new_size = round(int(matched.group(1)) / 1024)
-            changed_size = round((new_size - original_size) / original_size, 2)
+        if original_size and matched:
+            webp_size = math.ceil(int(matched.group(1)) / 1024)
+            changed_rate = round((webp_size - original_size) / original_size, 2)
 
-        return original_name, original_size, new_size, changed_size
+        return file_dir, file_name, original_size, webp_size, changed_rate
 
     def get_all_images(self, input_path: Path) -> Generator[Path, None, None]:
         if input_path.is_file() and self.is_image(input_path):
@@ -75,8 +76,12 @@ class Converter:
             for i in self.input_dir.glob("**/*"):
                 if self.is_image(i):
                     yield i
+                elif i.is_file():
+                    self.missing.append(str(i))
 
-    def convert(self, input_file: Path) -> tuple[str, int, int | None, float | None]:
+    def convert(
+        self, input_file: Path
+    ) -> tuple[str, str, int, int | None, float | None]:
         output_file = self.get_output_path(input_file)
 
         cli = "gif2webp" if input_file.suffix.lower() == ".gif" else "cwebp"
@@ -103,14 +108,16 @@ class Converter:
         images = self.get_all_images(self.input_dir)
         failed, bigger = [], []
 
-        details = self.output_dir / "details.csv"
-        headers = ["file", "original(KB)", "webp(KB)", "changed"]
+        headers = ["dir", "file", "original(KB)", "webp(KB)", "changed"]
+        converted_details = self.output_dir / "details.csv"
+        missing_files = self.output_dir / "missing.csv"
         if not self.output_dir.is_dir():
             self.output_dir.mkdir(parents=True)
 
         with (
             ProcessPoolExecutor() as executor,
-            open(details, "w", encoding="utf8", newline="") as f,
+            open(converted_details, "w", encoding="utf8", newline="") as f,
+            open(missing_files, "w", encoding="utf8") as m,
         ):
             writer = csv.DictWriter(f, fieldnames=headers)
             writer.writeheader()
@@ -119,18 +126,26 @@ class Converter:
                 writer.writerow(dict(zip(headers, result)))
                 count += 1
 
-                original_name, original_size, new_size, changed_size = result
+                file_dir, file_name, original_size, webp_size, changed_rate = result
                 logging.info(
-                    f"{original_name:<50}"
+                    f"{file_dir}/{file_name}"
                     f"| {original_size:>5} KB"
-                    + (f"| {new_size:>5} KB| {changed_size:>5.0%}" if new_size else "|")
+                    + (
+                        f"| {webp_size:>5} KB| {changed_rate:>5.0%}"
+                        if webp_size
+                        else "|"
+                    )
                 )
 
-                if changed_size is None:
-                    failed.append(original_name)
+                if changed_rate is None:
+                    failed.append(f"{file_dir}/{file_name}")
                     count -= 1
-                elif changed_size > 1:
-                    bigger.append(original_name)
+                elif changed_rate > 1:
+                    bigger.append(f"{file_dir}/{file_name}")
+
+            # write not converted files
+            for i in self.missing:
+                m.write(i)
 
         if bigger or failed:
             print(f"{'=' * 20} WARNING {'=' * 20}")
@@ -141,7 +156,8 @@ class Converter:
 
         print(f"{'=' * 20} Result {'=' * 20}")
         logging.info(f"Converted: {count}, Cost: {time.monotonic() - started_at:.2f}s")
-        logging.info(f"View all details in {details.resolve()}")
+        logging.info(f"View all details in {converted_details.resolve()}")
+        logging.info(f"View not converted files in {missing_files.resolve()}")
 
 
 def cli():

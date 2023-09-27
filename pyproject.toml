@@ -1,6 +1,5 @@
 [project]
 name = "convert-to-webp"
-version = "0.1.0"
 description = "Batch convert images to webp"
 authors = [
     {name = "GrassSand", email = "grasssand@users.noreply.github.com"},
@@ -10,6 +9,7 @@ dependencies = [
 requires-python = ">=3.10"
 readme = "README.md"
 license = {text = "MIT"}
+dynamic = ["version"]
 
 [project.scripts]
 convert-to-webp = "convert_to_webp.main:cli"
@@ -17,3 +17,7 @@ convert-to-webp = "convert_to_webp.main:cli"
 [build-system]
 requires = ["pdm-backend"]
 build-backend = "pdm.backend"
+
+[tool.pdm.version]
+source = "file"
+path = "src/convert_to_webp/__init__.py"
